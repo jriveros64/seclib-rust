@@ -1,0 +1,170 @@
+version: "3.8"
+
+services:
+  proxy:
+    image: caddy:2.7-alpine
+    container_name: seclib-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - net-proxy-app
+    # Hardening proxy container
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE # Required to bind to port 80/443
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+
+  app:
+    image: python:3.12-slim
+    container_name: seclib-app
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    user: "10001:10001" # non-root user
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:mode=1777,size=100M # Writable /tmp in memory
+    environment:
+      - ENV=production
+      - DEBUG=False
+    networks:
+      - net-proxy-app
+      - net-app-db
+      - net-app-redis
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
+
+  database:
+    image: postgres:15-alpine
+    container_name: seclib-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD_FILE=/run/secrets/db_password
+      - POSTGRES_USER=app_migrator
+      - POSTGRES_DB=app_db
+    secrets:
+      - db_password
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - net-app-db
+    read_only: true
+    tmpfs:
+      - /run/postgresql:mode=0775,size=10M
+      - /tmp:mode=1777,size=50M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
+
+  redis:
+    image: redis:7-alpine
+    container_name: seclib-redis
+    restart: unless-stopped
+    command: sh -c "exec redis-server --requirepass \$$(cat /run/secrets/redis_password)"
+    secrets:
+      - redis_password
+    volumes:
+      - redis_data:/data
+    networks:
+      - net-app-redis
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+
+  clamav:
+    image: clamav/clamav:stable
+    container_name: seclib-clamav
+    restart: unless-stopped
+    networks:
+      - net-app-clamav
+      - net-egress-clamav # Egress network for freshclam signature updates (M8)
+    # ClamAV updates signatures in background, requires writable /var/lib/clamav
+    volumes:
+      - clamav_data:/var/lib/clamav
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2048M
+
+  worker:
+    image: python:3.12-slim
+    container_name: seclib-worker
+    restart: unless-stopped
+    command: celery -A tasks worker --loglevel=info
+    user: "10001:10001"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:mode=1777,size=500M # quarantine and parsing
+    networks:
+      - net-app-redis
+      - net-app-db
+      - net-app-clamav
+    # Worker is completely isolated from general egress/internet in production
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2048M
+
+networks:
+  net-proxy-app:
+    internal: false # Exposed to proxy for inbound
+  net-app-db:
+    internal: true  # Segregated back-end networks
+  net-app-redis:
+    internal: true
+  net-app-clamav:
+    internal: true
+  net-egress-clamav:
+    internal: false # Allowed egress to ClamAV signature mirrors (M8)
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+  redis_password:
+    file: ./secrets/redis_password.txt
+
+volumes:
+  caddy_data:
+  caddy_config:
+  db_data:
+  redis_data:
+  clamav_data:

@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/seclib-core",
+    "bindings/seclib-py",
+    "server/seclib-server"
+]

@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Python es necesario para (a) compilar el binding PyO3 seclib-py,
+      # (b) los gates de shell, y (c) detect-secrets.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install detect-secrets
+        run: |
+          python -m pip install --upgrade pip
+          pip install detect-secrets
+
+      - name: Setup database role and permissions
+        run: |
+          docker exec ${{ job.services.postgres.id }} psql -U postgres -c "CREATE ROLE budgetflow_user LOGIN PASSWORD 'pass' NOSUPERUSER NOBYPASSRLS;"
+          docker exec ${{ job.services.postgres.id }} psql -U postgres -c "CREATE DATABASE budgetflow_test OWNER budgetflow_user;"
+          docker exec ${{ job.services.postgres.id }} psql -U postgres -d budgetflow_test -c "GRANT ALL ON SCHEMA public TO budgetflow_user;"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: clippy, rustfmt
+
+      - name: Check formatting (Rust)
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy (Rust Release)
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Run clippy (Rust all-targets + tests)
+        run: cargo clippy --workspace --all-targets --features test-loopback -- -D warnings
+
+      - name: Install cargo quality tools (deny, machete)
+        run: |
+          curl -sSL https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.1/cargo-deny-0.19.1-x86_64-unknown-linux-musl.tar.gz | tar -xz --strip-components 1 --wildcards "*/cargo-deny"
+          sudo mv cargo-deny /usr/local/bin/
+          curl -sSL https://github.com/bnjbvr/cargo-machete/releases/download/v0.6.2/cargo-machete-v0.6.2-x86_64-unknown-linux-musl.tar.gz | tar -xz --strip-components 1
+          sudo mv cargo-machete /usr/local/bin/
+
+      - name: Run cargo deny check
+        run: cargo deny check
+
+      - name: Run cargo machete check
+        run: cargo machete
+
+      - name: "Gate: Check for unauthorized clippy allows (Rust)"
+        run: |
+          python -c '
+          import sys, glob, re
+          files = glob.glob("crates/**/*.rs", recursive=True) + glob.glob("bindings/**/*.rs", recursive=True) + glob.glob("server/**/*.rs", recursive=True)
+          allow_clippy_re = re.compile(r"allow\s*\(\s*clippy\s*::")
+          failed = False
+          for f in files:
+              with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                  lines = fh.readlines()
+              for i, line in enumerate(lines):
+                  if allow_clippy_re.search(line):
+                      j = i - 1
+                      justified = False
+                      while j >= 0:
+                          prev = lines[j].strip()
+                          if prev == "" or prev.startswith("#[") or prev.startswith("#!["):
+                              j -= 1
+                              continue
+                          justified = "justificado:" in lines[j]
+                          break
+                      if not justified:
+                          print(f"Error: {f}:{i+1} has allow(clippy::) without preceding // justificado comment.")
+                          failed = True
+          if failed:
+              sys.exit(1)
+          '
+
+      - name: "Gate: Check for forbidden bypass/TODO patterns (Rust)"
+        run: |
+          python -c '
+          import sys, glob, re
+          files = glob.glob("crates/**/*.rs", recursive=True) + glob.glob("server/**/*.rs", recursive=True)
+          forbidden = re.compile(r"\b(TODO|FIXME|HACK|XXX|ALLOW_[A-Z0-9_]+|SKIP_[A-Z0-9_]+|BYPASS_[A-Z0-9_]+)\b")
+          failed = False
+          for f in files:
+              if "parity_tests.rs" in f:
+                  continue
+              with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                  for i, line in enumerate(fh):
+                      if forbidden.search(line):
+                          if "justificado" not in line.lower():
+                              print(f"Error: {f}:{i+1} contains forbidden pattern without justificado: {line.strip()}")
+                              failed = True
+          if failed:
+              sys.exit(1)
+          '
+
+      - name: Run Rust test suite (with Postgres RLS test)
+        run: cargo test --workspace --features test-loopback
+        env:
+          TEST_DATABASE_URL: postgres://budgetflow_user:pass@localhost:5432/budgetflow_test
+
+      - name: Scan for committed secrets (delta checks)
+        run: |
+          detect-secrets scan --exclude-files ".*Cargo.lock.*|.*tests.*|.*conftest.py|.*\.secrets\.baseline" > .secrets_scan.json
+          python -c '
+          import json, sys, os
+
+          baseline = {}
+          if os.path.exists(".secrets.baseline"):
+              with open(".secrets.baseline") as f:
+                  try:
+                      baseline = json.load(f).get("results", {})
+                  except Exception:
+                      pass
+
+          scan = {}
+          if os.path.exists(".secrets_scan.json"):
+              with open(".secrets_scan.json") as f:
+                  try:
+                      scan = json.load(f).get("results", {})
+                  except Exception:
+                      pass
+
+          new_secrets = {}
+          for file_path, secrets in scan.items():
+              baseline_secrets = baseline.get(file_path, [])
+              baseline_hashes = {s.get("hashed_secret") for s in baseline_secrets if s.get("hashed_secret")}
+
+              for s in secrets:
+                  h = s.get("hashed_secret")
+                  if h and h not in baseline_hashes:
+                      new_secrets.setdefault(file_path, []).append(s)
+
+          if new_secrets:
+              print("New secrets found in repository compared to .secrets.baseline:")
+              print(json.dumps(new_secrets, indent=2))
+              sys.exit(1)
+          print("No new secrets detected.")
+          '

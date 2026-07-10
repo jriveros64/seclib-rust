@@ -1,0 +1,69 @@
+{
+    # Global HTTP request limits
+    servers {
+        max_header_size 16kb
+    }
+}
+
+# Replace with actual host domain in production
+http://localhost, https://localhost {
+    # Restrict TLS versions and suites inside the site block (M7)
+    tls {
+        protocols tls1.2 tls1.3
+        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    }
+
+    # Route for file uploads allows up to 50MB (PDF size limit in §5.2) (M7)
+    handle /api/v1/files/upload {
+        request_body {
+            max_size 50MB
+        }
+        reverse_proxy seclib-app:8000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            flush_interval -1
+        }
+    }
+
+    # Rest of the site requests are limited to 10MB (M7)
+    request_body {
+        max_size 10MB
+    }
+
+    # Proxy to FastAPI App
+    reverse_proxy /api/* seclib-app:8000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        
+        # Buffer responses to prevent slow-loris and buffer overflows
+        flush_interval -1
+    }
+    
+    # Proxy to Authentik/Keycloak IdP
+    reverse_proxy /auth/* authentik-server:9000
+
+    # Fallback to serving static assets safely
+    root * /srv/www
+    file_server {
+        hide .git
+    }
+
+    # Inject static security headers
+    header {
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        Cross-Origin-Opener-Policy "same-origin"
+        
+        # Remove server banner
+        -Server
+    }
+
+    # Log requests as JSON
+    log {
+        output file /var/log/caddy/access.log
+        format json
+    }
+}

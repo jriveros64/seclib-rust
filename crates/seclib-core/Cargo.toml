@@ -1,0 +1,70 @@
+[package]
+name = "seclib-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "proprietary"
+publish = false
+description = "Core logic of Transversal Security Layer (seclib)"
+
+[lib]
+name = "seclib_core"
+path = "src/lib.rs"
+
+[dependencies]
+# --- Criptografía ---
+aes-gcm = "0.10"
+argon2 = "0.5"
+hmac = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+subtle = "2"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+
+# --- JWT / OIDC ---
+jsonwebtoken = "9"
+redis = { version = "0.25", features = ["tokio-comp"] }
+
+# --- HTTP saliente ---
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+url = "2"
+
+# --- Async ---
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "chrono"] }
+async-trait = "0.1"
+
+# --- Archivos ---
+zip = "2"
+infer = "0.16"
+calamine = "0.26"
+lopdf = "0.34"
+
+# --- Serialización / config ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+figment = { version = "0.10", features = ["env", "toml"] }
+secrecy = { version = "0.8", features = ["serde"] }
+
+# --- Logging ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# --- Utilidades ---
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+base64 = "0.22"
+hex = "0.4"
+
+[dev-dependencies]
+mockito = "1.4"
+
+[features]
+test-loopback = []
+
+[[test]]
+name = "parity_tests"
+required-features = ["test-loopback"]

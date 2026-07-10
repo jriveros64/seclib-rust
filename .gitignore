@@ -1,0 +1,7 @@
+/target/
+**/*.rs.bk
+Cargo.lock.orig
+.secrets_scan.json
+*.log
+infra-base/secrets/*.txt
+!infra-base/secrets/*.example

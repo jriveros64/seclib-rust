@@ -1,0 +1,17 @@
+[package]
+name = "seclib-py"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[lib]
+name = "seclib"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+seclib-core = { path = "../../crates/seclib-core" }
+secrecy = { version = "0.8", features = ["serde"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
